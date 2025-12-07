@@ -1,0 +1,1439 @@
+---
+title: "SpyCI-LAMBS Sequence-to-Function Analysis"
+author: "Patrick Diep"
+format: html
+editor: visual
+lightbox: true
+---
+
+## Bioinformatics Questions
+
+What we need to do is think of the important questions related to the relationship between the sequence and the function (selectivity). Doing this will guide our analysis in R, and the type of code we need.
+
+-   
+
+```{r}
+#Set the directory first. 
+setwd("C:/Users/diep5/OneDrive - LLNL/A. SpyTagCatcher Project/A.1 Python Scripts/Ortholog_Analysis/08-23-2024, Final Material")
+```
+
+```{r}
+data_from_python <- "08-30-2024_updated_master_sheet_test3 (for R).csv"
+```
+
+```{r}
+#| eval: false
+df1 <- read.csv(data_from_python, row.names = 7, nrows = 25)
+```
+
+```{r}
+library(rentrez)
+library(ggmsa)
+library(ggtree)
+library(ggtreeExtra)
+library(ggplot2)
+library(pbapply)
+library(msa)
+library(Biostrings)
+library(BiocManager)
+library(phangorn)
+library(ape)
+library(stringr)
+library(patchwork)
+library(Cairo)
+library(ggseqlogo)
+library(gridExtra)
+library(ggnewscale)
+```
+
+```{r}
+#| eval: false
+
+get_ncbi_db <- function(acc) {
+  if (grepl("^(WP|YP|NP|XP|ZP)_", acc)) {
+    # RefSeq protein accession numbers with underscores
+    return("protein")
+  } else if (grepl("^[A-Z]{3}[A-Z0-9]{5,}\\.[0-9]+$", acc)) {
+    # GenBank protein accession numbers with three-letter prefixes (e.g., RUP13001.1)
+    return("protein")
+  } else if (grepl("^[A-Z]{2}[A-Z0-9]{6,}\\.[0-9]+$", acc)) {
+    # GenBank protein accession numbers with two-letter prefixes (e.g., PZQ11333.1)
+    return("protein")
+  } else {
+    # Default to 'nuccore' if unsure, can adjust based on data
+    return("nuccore")
+  }
+}
+
+```
+
+```{r}
+#| eval: false
+
+# Extract accession numbers from df1
+accession_numbers <- df1$nodeacc2
+
+# Function to get organism name from accession number
+get_organism_name <- function(acc) {
+  Sys.sleep(0.34)  # Adjust delay to respect NCBI rate limits
+  db <- get_ncbi_db(acc)
+  tryCatch({
+    summary <- entrez_summary(db = db, id = acc)
+    if ("organism" %in% names(summary)) {
+      return(summary$organism)
+    } else if ("title" %in% names(summary)) {
+      # Extract organism name from the 'title' field
+      organism <- sub(" \\[.*\\]$", "", summary$title)
+      return(organism)
+    } else {
+      message(paste("No 'organism' or 'title' field for accession:", acc))
+      return(NA)
+    }
+  }, error = function(e) {
+    message(paste("Error retrieving organism for accession:", acc, "\nError message:", e$message))
+    return(NA)
+  })
+}
+
+# Retrieve organism names
+organism_names <- pbsapply(accession_numbers, get_organism_name)
+
+# Add organism names to df1 as a new column
+df1$organism_name <- organism_names
+print(df1$organism_name)
+
+```
+
+```{r}
+#| eval: false
+
+clean_organism_name <- function(name) {
+  if (is.na(name)) return(NA)
+  
+  # Remove strain or subspecies information
+  name <- sub(" strain.*", "", name)
+  name <- sub(" subsp.*", "", name)
+  
+  # Remove " sp. " and any text that follows
+  #name <- sub(" sp\\. .*", "", name)
+  
+  # Remove apostrophes
+  name <- sub("'", "", name)
+  
+  # Remove leading and trailing whitespace
+  name <- trimws(name)
+  
+  return(name)
+}
+# Apply the cleaning function and create a new column
+df1$cleaned_organism_name <- sapply(df1$organism_name, clean_organism_name)
+# View the first few rows to verify
+print(df1$cleaned_organism_name)
+
+```
+
+```{r}
+#| eval: false
+
+# Function to retrieve 16S rRNA sequence for a given organism name
+get_16S_sequence <- function(organism_name) {
+  Sys.sleep(0.34)  # Adjust delay as per NCBI guidelines
+  tryCatch({
+    if (is.na(organism_name)) return(NA)
+    # Construct the expanded search term with exact phrase matching
+    search_term <- paste0('"', organism_name, '"[Organism] AND (16S ribosomal RNA[Gene] OR 16S rRNA[Gene] OR 16S gene[Gene])')
+    
+    # Search Nucleotide database for 16S rRNA gene
+    search_results <- entrez_search(db = "nucleotide", term = search_term, retmax = 1)
+    
+    # Check if any IDs are found
+    if (length(search_results$ids) == 0) {
+      message(paste("No 16S rRNA sequence found for organism:", organism_name))
+      return(NA)
+    }
+    
+    # Fetch the sequence in FASTA format
+    sequence <- entrez_fetch(db = "nucleotide", id = search_results$ids[1], rettype = "fasta")
+    return(sequence)
+  }, error = function(e) {
+    message(paste("Error retrieving 16S rRNA sequence for organism:", organism_name, "\nError message:", e$message))
+    return(NA)
+  })
+}
+
+# Apply the function to retrieve sequences
+library(pbapply)
+sequences_16S <- pbsapply(df1$cleaned_organism_name, get_16S_sequence)
+
+# Add sequences to your dataframe
+df1$sequence_16S <- sequences_16S
+print(df1$sequence_16S)
+```
+
+```{r}
+#| eval: false
+
+# Filter out rows where sequence_16S is NA
+valid_sequences <- df1[!is.na(df1$sequence_16S), ]
+
+# Create a named character vector of sequences
+fasta_entries <- paste0(valid_sequences$sequence_16S)
+
+# Write the sequences to a FASTA file
+writeLines(fasta_entries, "16S_sequences.fasta")
+
+seqs <- readDNAStringSet("16S_sequences.fasta", format = "fasta")
+
+# Perform multiple sequence alignment
+alignment <- msa(seqs, method = "ClustalW")  # Choose "Muscle" or "ClustalOmega" if preferred
+
+# View the alignment
+print(alignment)
+```
+
+```{r}
+#| eval: false
+
+# Convert the alignment object to a DNAStringSet
+alignment_dna <- as(alignment, "DNAStringSet")
+writeXStringSet(alignment_dna, filepath = "alignment_output_test.fasta")
+```
+
+```{r}
+#| eval: false
+
+# Convert the DNAStringSet alignment to a phyDat object
+alignment_phydat <- phyDat(as(alignment_dna, "matrix"), type = "DNA")
+
+# Compute the distance matrix
+dist_matrix <- dist.ml(alignment_phydat)
+
+# Create a tree using Neighbor-Joining (NJ)
+nj_tree <- NJ(dist_matrix)
+
+# Use ggtree to plot the tree and adjust spacing
+max_branch_length <- max(nj_tree$edge.length)
+
+ggtree(nj_tree) + 
+  geom_tiplab(size = 3, align = TRUE, linetype = "dotted", linesize = 0.5, offset = 0.2) +  # Aligns labels, adds lines
+  theme_tree2() +  # Adjusts the theme to give more space to the tree
+  ggtitle("Neighbor-Joining Phylogenetic Tree") +
+  xlim(NA, max_branch_length + 1) +  # Slightly adjust x-axis to fit tree with labels
+  theme(plot.margin = unit(c(0.5,1.5,0.5,1.5), "cm"))  # Adjust margins around the plot
+```
+
+```{r, fig.width=10, fig.height=5}
+#| eval: false
+
+# Compute a Maximum Likelihood (ML) tree
+fit <- pml(nj_tree, alignment_phydat)  # Use NJ tree as the starting tree
+ml_tree <- optim.pml(fit, optNni = TRUE)  # Optimize using Maximum Likelihood
+
+# Extract the phylo object from the optimized ML tree
+ml_phylo <- ml_tree$tree  # Extract the tree from the `pml` object
+
+# Wrap the labels at a certain width (e.g., 10 characters per line)
+wrapped_labels <- str_wrap(ml_phylo$tip.label, width = 50)
+
+# Modify the tip labels directly in the phylo object
+ml_phylo$tip.label <- wrapped_labels
+
+# Use ggtree to plot the ML tree and adjust spacing
+max_branch_length <- max(ml_phylo$edge.length)
+
+# Plot the tree with wrapped labels
+ggtree(ml_phylo) + 
+  geom_tiplab(size = 3, align = FALSE, linetype = "dotted", linesize = 0.5, offset = 0.05) +  # Use wrapped labels
+  theme_tree2() +  # Adjusts the theme for better spacing
+  ggtitle("Maximum Likelihood Phylogenetic Tree") +  # Update the title to reflect ML tree
+  xlim(NA, max_branch_length + 0.5) +  # Slightly adjust x-axis to fit tree with labels
+  theme(plot.margin = unit(c(0.2, 1.5, 0.2, 1.5), "cm"))  # Adjust margins
+```
+
+```{r}
+
+#==========================================================================#
+#===============THIS IS THE BEGINNING OF THE DATA PROCESSSING==============#
+#==========================================================================#
+
+python_colors <- c(
+  "#8da0cb",  # Blue
+  "#ffd92f",  # Yellow
+  "#a6d854",  # Green
+  "#e78ac3",  # Pink
+  "#fc8d62",  # Orange
+  "#e5c494",  # Brown
+  "#66c2a5",  # Turquoise (Greenish)
+  "#b3b3b3"   # Grey
+)
+
+# Read the CSV data
+df2 <- read.csv(data_from_python, row.names = 7)
+
+# Replace spaces with underscores in the 'source_original' column
+source_clean <- gsub(" ", "_", df2$source_original)
+
+# Create a character vector for FASTA entries
+prot_entries <- paste0(">", df2$"ID.6", "__", source_clean, "\n", df2$Sequence..SP.Removed)
+
+# Write the FASTA entries to a file
+writeLines(prot_entries, "output_protsequences_test.fasta")
+
+# Read the sequences from the FASTA file
+seqs <- readAAStringSet("output_protsequences_test.fasta", format = "fasta")
+
+# Perform multiple sequence alignment
+prot_alignment <- msa(seqs, method = "Muscle")  # You can choose "Muscle" or "ClustalOmega"
+
+# View the alignment
+print(prot_alignment)
+
+# Convert the alignment object to an AAStringSet
+alignment_protein <- as(prot_alignment, "AAStringSet")
+
+# **Remove columns with high gap content (>= 95% gaps)**
+
+# Convert alignment to a character matrix for easier manipulation
+alignment_matrix <- do.call(rbind, strsplit(as.character(alignment_protein), ""))
+
+# Set the gap threshold
+gap_threshold <- 0.95  # Columns with 95% or more gaps will be removed
+
+# Identify columns where the proportion of gaps ('-') is less than the threshold
+cols_to_keep <- apply(alignment_matrix, 2, function(col) {
+  mean(col == "-") < gap_threshold
+})
+
+# Filter out columns with too many gaps
+filtered_alignment_matrix <- alignment_matrix[, cols_to_keep]
+
+# Convert the filtered alignment matrix back to AAStringSet
+filtered_alignment_strings <- apply(filtered_alignment_matrix, 1, paste, collapse = "")
+filtered_alignment <- AAStringSet(filtered_alignment_strings)
+names(filtered_alignment) <- names(alignment_protein)  # Preserve sequence names
+
+# Write the filtered alignment to a new FASTA file
+writeXStringSet(filtered_alignment, filepath = "10-03-2024, prot_alignment_output_test_filtered.fasta")
+```
+
+```{r}
+
+#==========================================================================#
+#=====================THIS CHUNK IS TO MAKE THE TREES======================#
+#==========================================================================#
+
+# Convert the AAStringSet alignment to a phyDat object for phylogenetic analysis
+alignment_phydat <- phyDat(as(alignment_protein, "matrix"), type = "AA")  # Type = "AA" for amino acid sequences
+
+# Compute the distance matrix using the Maximum Likelihood method for protein sequences
+dist_matrix <- dist.ml(alignment_phydat)
+
+# Create a Neighbor-Joining (NJ) tree as a starting point for Maximum Likelihood optimization
+nj_tree <- NJ(dist_matrix)
+
+# Perform model testing to select the best substitution model
+mt <- modelTest(alignment_phydat, model = "mtmam", multicore = TRUE, mc.cores = 4)
+
+# Convert the modelTest results to a data frame
+mt_results <- as.data.frame(mt)
+
+# Extract the best model based on AICc (you can also use BIC or AIC)
+best_model_index <- which.min(mt_results$AICc)
+best_model <- mt_results[best_model_index, ]
+
+# Extract substitution model and parameters
+model_parts <- unlist(strsplit(as.character(best_model$Model), "+", fixed = TRUE))
+subst_model <- model_parts[1]
+has_gamma <- "+G" %in% model_parts
+has_inv <- "+I" %in% model_parts
+
+# Set parameters for pml
+k_value <- if (has_gamma) 4 else 1  # Number of rate categories for the gamma distribution
+inv_value <- if (has_inv) 0.2 else 0  # Initial proportion of invariant sites (can adjust as needed)
+
+# Compute a Maximum Likelihood (ML) tree starting with the NJ tree, using the best model
+fit <- pml(nj_tree, alignment_phydat, model = subst_model, k = k_value, inv = inv_value)
+
+# Optimize the tree using Maximum Likelihood
+ml_tree <- optim.pml(
+  fit,
+  optNni = TRUE,
+  model = subst_model,
+  optGamma = has_gamma,
+  optInv = has_inv,
+  optBf = TRUE  # Optimize base frequencies
+)
+
+# Perform bootstrap analysis with 500 bootstrap replicates
+bootstrap_trees <- bootstrap.pml(
+  fit,
+  bs = 2,
+  optNni = TRUE,
+  model = subst_model,
+  optGamma = has_gamma,
+  optInv = has_inv,
+  optBf = TRUE
+)
+
+# Add bootstrap support to the tree and extract the phylo object
+ml_phylo <- plotBS(ml_tree$tree, bootstrap_trees, p = 50)  
+
+# Re-root the tree based on the outgroup
+ml_phylo <- root(ml_phylo, outgroup = "49__wastewater_metagenome", resolve.root = TRUE)
+
+# Use ggtree to plot the ML tree and adjust spacing (this remains unchanged)
+max_branch_length <- max(ml_phylo$edge.length)
+
+```
+
+```{r, fig.width=12, fig.height=105}
+#==========================================================================#
+#======================THIS IS TO MAKE FULL MSA TREE=======================#
+#==========================================================================#
+
+# Select specific columns for heatmap (e.g., "Y.9", "La.9", "Ce.9", etc.)
+heatmap_data <- df2[, c("Y.9", "La.9", "Ce.9", "Pr.9", "Nd.9", "Sm.9", "Eu.9", 
+                        "Gd.9", "Tb.9", "Dy.9", "Ho.9", "Er.9", "Tm.9", "Yb.9", 
+                        "Lu.9")]
+
+# Create tip labels in the same format as the tree: "ID.6__source_original"
+rownames(heatmap_data) <- paste0(df2$`ID.6`, "__", gsub(" ", "_", df2$source_original))
+
+# Replace any NA values in the heatmap data with 0 (or another placeholder)
+heatmap_data[is.na(heatmap_data)] <- 0
+
+# Ensure the row names match the tip labels in the tree
+ml_phylo$tip.label <- gsub(" ", "_", ml_phylo$tip.label)  # Replace spaces with underscores in tip labels if necessary
+rownames(heatmap_data) <- gsub(" ", "_", rownames(heatmap_data))  # Replace spaces with underscores if necessary
+
+# Extract the agglomerative cluster information and align it with the tree tips
+cluster_data <- data.frame(
+  label = paste0(df2$`ID.6`, "__", gsub(" ", "_", df2$source_original)),
+  cluster = factor(df2$agglomerative_cluster, levels = unique(df2$agglomerative_cluster))
+)  # Consistent levels for all clusters
+
+# Plot the ML tree using ggtree
+tree_plot <- ggtree(ml_phylo, branch.length = "none", color = 'darkgrey')
+
+# Extract the data from the tree_plot object
+tree_data <- tree_plot$data
+
+# Ensure that bootstrap values are in the label column for internal nodes
+# ml_phylo$node.label contains bootstrap values for internal nodes
+# The node numbers for internal nodes start after the number of tips
+n_tips <- length(ml_phylo$tip.label)
+n_nodes <- ml_phylo$Nnode  # Number of internal nodes
+
+# Create a vector of node numbers for internal nodes
+internal_node_numbers <- (n_tips + 1):(n_tips + n_nodes)
+
+# Create a data frame of node numbers and bootstrap values
+bootstrap_data <- data.frame(
+  node = internal_node_numbers,
+  bootstrap = as.numeric(ml_phylo$node.label)
+)
+
+# Merge bootstrap data into tree_data
+tree_data <- merge(tree_data, bootstrap_data, by = "node", all.x = TRUE)
+
+# Create a new label combining node number and bootstrap value
+tree_data$new_label <- ifelse(
+  !is.na(tree_data$bootstrap),
+  paste0(tree_data$node, ",", sprintf("%.2f", tree_data$bootstrap)),
+  paste0("")
+)
+
+# Update the tree_plot data
+tree_plot$data <- tree_data
+
+# Modify the tree_plot by adding the tip labels and node labels (both node ID and bootstrap value)
+tree_plot <- tree_plot +
+  geom_tiplab(
+    size = 3, align = TRUE, linetype = "dotted", linesize = 0.1, 
+    offset = 10, color = 'black'
+  ) +
+  geom_text2(
+    aes(label = new_label),
+    hjust = 0.5,
+    size = 2
+  ) +
+  theme_tree2() +
+  xlim(NA, 150)
+
+# Add shapes corresponding to the agglomerative cluster between the tree tip labels and the heatmap using geom_fruit
+p <- tree_plot + 
+  geom_fruit(
+    data = cluster_data,
+    geom = geom_point, 
+    mapping = aes(y = label, color = as.factor(cluster)), 
+    size = 4, shape = 15, offset = 0.125
+  ) +
+  scale_color_manual(
+    values = python_colors, 
+    name = "Agglomerative Cluster", drop = FALSE
+  )  # Keep all colors, even if some clusters are missing
+
+# Add the heatmap using gheatmap
+q <- gheatmap(
+  p, heatmap_data, offset = 60, width = 1.1, 
+  legend_title = "Selectivity", font.size = 3, colnames_position = "top"
+) +
+  scale_fill_gradientn(colors = c("turquoise", "white", "red"))
+
+# Save the plot as a PDF
+# CairoPDF("10-07-2024_fullMSA_BS.pdf", width = 12, height = 105)
+print(q)
+dev.off()
+
+
+```
+
+![](images/clipboard-9133593.png)
+
+The chunk below is the same above, except you can specify multiple nodes to collapse.
+
+```{r, fig.width=8, fig.height=17}
+
+#==========================================================================#
+#=====================TO EXTRACT CLADES BETWEEN CLADES=====================#
+#==========================================================================#
+# Define the nodes to extract and stop at
+node_to_extract <- 868  # Start node
+stop_node <- 837 # Stop node
+
+# Function to prune a tree, removing tips under stop_node after extracting start_node
+prune_tree_between_nodes <- function(tree, start_node, stop_node) {
+  # Get descendants of start_node (full clade)
+  descendants_start <- Descendants(tree, start_node, type = "tips")[[1]]
+  
+  # Get descendants of stop_node
+  descendants_stop <- Descendants(tree, stop_node, type = "tips")[[1]]
+  
+  # Remove descendants of stop_node from descendants of start_node
+  keep_tips <- setdiff(descendants_start, descendants_stop)
+  
+  # Prune tree to keep only the tips between start_node and stop_node
+  pruned_tree <- keep.tip(tree, tree$tip.label[keep_tips])
+  return(pruned_tree)
+}
+
+# Prune the subtree to extract the clade starting at node_to_extract and stopping at stop_node
+subtree_pruned <- prune_tree_between_nodes(ml_phylo, node_to_extract, stop_node)
+
+# Filter the cluster data and heatmap data to match the subtree tip labels
+subtree_labels <- subtree_pruned$tip.label
+
+# Ensure factor levels remain consistent for all clusters
+cluster_data <- data.frame(label = paste0(df2$`ID.6`, "__", gsub(" ", "_", df2$source_original)),
+                           cluster = factor(df2$agglomerative_cluster, levels = unique(df2$agglomerative_cluster)))  # Same factor levels
+
+# Filter cluster_data and heatmap_data to match the subtree tip labels
+cluster_data_subtree <- cluster_data[cluster_data$label %in% subtree_labels, ]
+heatmap_data_subtree <- heatmap_data[rownames(heatmap_data) %in% subtree_labels, ]
+
+# Plot the pruned subtree
+subtree_plot <- ggtree(subtree_pruned, branch.length = "none") + 
+  geom_tiplab(size = 3, align = TRUE, linetype = "dotted", linesize = 0.5, offset = 3) + 
+  theme_tree2() +
+  theme(legend.position = "none")
+
+# Add shapes corresponding to the agglomerative cluster using geom_fruit
+subtree_plot <- subtree_plot + 
+  geom_fruit(data = cluster_data_subtree, geom = geom_point, 
+             mapping = aes(y = label, color = as.factor(cluster)), 
+             size = 3, shape = 15, offset = 0.1) +  
+  scale_color_manual(values = python_colors, name = "Agglomerative Cluster", drop = FALSE)  # Keep all colors for consistency
+
+# Add the heatmap to the subtree plot
+subtree_plot_with_heatmap <- gheatmap(subtree_plot, heatmap_data_subtree, 
+                                      offset = 20, width = 0.65, 
+                                      legend_title = "Selectivity", 
+                                      font.size = 3, colnames_position = "top") +
+  scale_fill_gradientn(colors = c("turquoise", "white", "red")) +
+  theme(legend.position = "none")
+
+subtree_plot_with_heatmap
+
+```
+
+```{r, fig.width=8, fig.height=17}
+
+#==========================================================================#
+#====================TO EXTRACT SINGLE TERMINAL CLADES=====================#
+#==========================================================================#
+
+# Define the node to extract the subtree
+node_to_extract <- 670
+
+# Extract the subtree rooted at node 671
+subtree <- extract.clade(ml_phylo, node_to_extract)
+
+# Filter the cluster data and heatmap data to match the subtree
+subtree_labels <- subtree$tip.label
+
+# Ensure factor levels remain consistent for all clusters
+cluster_data <- data.frame(label = paste0(df2$`ID.6`, "__", gsub(" ", "_", df2$source_original)),
+                           cluster = factor(df2$agglomerative_cluster, levels = unique(df2$agglomerative_cluster)))  # Same factor levels
+
+# Filter cluster_data and heatmap_data to match the subtree tip labels
+cluster_data_subtree <- cluster_data[cluster_data$label %in% subtree_labels, ]
+heatmap_data_subtree <- heatmap_data[rownames(heatmap_data) %in% subtree_labels, ]
+
+# Plot the new subtree
+subtree_plot <- ggtree(subtree, branch.length = "none") + 
+  geom_tiplab(size = 3, align = TRUE, linetype = "dotted", linesize = 0.5, offset = 3) + 
+  theme_tree2() +
+  theme(legend.position = "none")
+
+# Add shapes corresponding to the agglomerative cluster using geom_fruit
+subtree_plot <- subtree_plot + 
+  geom_fruit(data = cluster_data_subtree, geom = geom_point, 
+             mapping = aes(y = label, color = as.factor(cluster)), 
+             size = 3, shape = 15, offset = 0.1) +  
+  scale_color_manual(values = python_colors, name = "Agglomerative Cluster", drop = FALSE)  # Keep all colors for consistency
+
+# Add the heatmap to the subtree plot
+subtree_plot_with_heatmap <- gheatmap(subtree_plot, heatmap_data_subtree, 
+                                      offset = 20, width = 0.65, 
+                                      legend_title = "Selectivity", 
+                                      font.size = 3, colnames_position = "top") +
+  scale_fill_gradientn(colors = c("turquoise", "white", "red")) +
+  theme(legend.position = "none")
+
+# Display the final plot with the subtree, shapes, and heatmap
+subtree_plot_with_heatmap
+
+
+```
+
+The following below makes seqlogos for terminal clades.
+
+```{r}
+#==========================================================================#
+#==================TO GENERATE MSAS FOR TERMINAL CLADES====================#
+#==========================================================================#
+
+# Define the node to extract the subtree
+node_to_extract <- 991
+
+subtree <- extract.clade(ml_phylo, node_to_extract)
+
+# Convert the subtree to a dataframe to capture node order
+subtree_df <- fortify(subtree)
+
+# Order the tip labels by their y values in descending order (largest to smallest)
+ordered_labels <- subtree_df$label[order(-subtree_df$y)]
+
+# Remove any NA values from ordered_labels
+ordered_labels <- ordered_labels[!is.na(ordered_labels)]
+
+# Filter the cluster data and heatmap data to match the ordered subtree tip labels
+cluster_data <- data.frame(label = paste0(df2$ID.6, "__", gsub(" ", "_", df2$source_original)),
+                           cluster = factor(df2$agglomerative_cluster, levels = unique(df2$agglomerative_cluster)))  # Ensure consistent factor levels
+
+cluster_data_subtree <- cluster_data[cluster_data$label %in% ordered_labels, ]
+heatmap_data_subtree <- heatmap_data[rownames(heatmap_data) %in% ordered_labels, ]
+
+num_sequences <- length(ordered_labels)
+height_per_sequence <- 0.15 # Adjust this value to control the height per sequence
+dynamic_height <- num_sequences * height_per_sequence
+
+#==========================================================================#
+# Define the function to generate MSA plots for multiple windows
+generate_msa_plots <- function(filtered_alignment, ordered_labels, windows) {
+  # Ensure alignment is in the correct order
+  ordered_alignment <- filtered_alignment[match(ordered_labels, names(filtered_alignment))]
+  
+  # Create an empty list to store plots
+  msa_plots <- list()
+  
+  # Loop through each window and generate the corresponding MSA plot
+  for (i in seq_along(windows)) {
+    window_start <- windows[[i]][1]
+    window_end <- windows[[i]][2]
+    
+    # Extract sequence data to use for overlaying text
+    alignment_data <- ggmsa::tidy_msa(ordered_alignment, start = window_start, end = window_end)
+    
+# Plot MSA using ggmsa and add text labels for amino acids
+msa_plot <- ggmsa(ordered_alignment, start = window_start, end = window_end, font = NULL, color = "Chemistry_AA") +
+  theme(legend.position = "none",  # Remove the legend
+        axis.text.y = element_text(size = 6, margin = margin(r = -35))) +  # Reduce right margin to bring y-axis labels closer
+  geom_text(data = alignment_data, aes(x = position, y = name, label = character), size = 2, color = "black") +  # Add text labels for amino acids
+  scale_x_continuous(breaks = seq(window_start, window_end, by = 5),  
+                     labels = seq(window_start, window_end, by = 5))
+    
+    # Add the plot to the list
+    msa_plots[[i]] <- msa_plot
+  }
+  
+  # Return the list of plots
+  return(msa_plots)
+}
+
+# Define the labels for each plot
+labels <- c("Everything", "EF1", "EF2", "EF3", "EF4")
+
+# Define the windows to process
+windows <- list(
+  c(0,114),   #Full_Length
+  c(16,27),   #EF1
+  c(40,51),   #EF2
+  c(65,76),   #EF3
+  c(89,100)   #EF4
+)
+
+# Call the function to generate the plots
+msa_plots <- generate_msa_plots(filtered_alignment, ordered_labels, windows)
+
+# Save the plot with dynamic height using ggsave()
+# Loop through each MSA plot and save them with dynamic file names
+for (i in seq_along(msa_plots)) {
+  # Define the file name using node_to_extract and the corresponding label
+  msa_subplot_fileName <- paste0("msa_subplot_", node_to_extract, "_", labels[i], ".png")
+  
+  # Save the plot for the current window
+  ggsave(msa_subplot_fileName, msa_plots[[i]], width = 12, height = dynamic_height, limitsize = FALSE)
+}
+
+# msa_plots[[1]]
+# msa_plots[[2]]
+# msa_plots[[3]]
+# msa_plots[[4]]
+```
+
+```{r}
+
+#==========================================================================#
+#==========TO MAKE SEQUENCE LOGOS FOR THE TERMINAL CLADE ABOVE=============#
+#==========================================================================#
+
+# Define the function to generate sequence logos for multiple windows and export as SVG
+generate_sequence_logos_and_export <- function(filtered_alignment, ordered_labels, windows, labels, node_to_extract) {
+  # Ensure alignment is in the correct order
+  ordered_alignment <- filtered_alignment[match(ordered_labels, names(filtered_alignment))]
+  
+  # Loop through each window and generate the corresponding sequence logo
+  for (i in seq_along(windows)) {
+    # Get the start and end positions for the current window
+    window_start <- windows[[i]][1]
+    window_end <- windows[[i]][2]
+    
+    # Extract the specific window from the MSA
+    aligned_sequences <- as.character(ordered_alignment)
+    aligned_window <- substring(aligned_sequences, window_start, window_end)
+    
+    # Convert cleaned sequences to AAStringSet (or DNAStringSet if working with DNA)
+    cleaned_sequences <- AAStringSet(aligned_window)
+    
+    # Generate the position frequency matrix (PFM)
+    pfm <- consensusMatrix(cleaned_sequences, as.prob = TRUE)
+    
+    # Plot the PFM with ggseqlogo and add the label at the top of each plot
+    seq_logo <- ggseqlogo(pfm, method = "bits", seq_type = "AA", col_scheme = "clustalx") + 
+      ggtitle(labels[i]) +  # Add the label for each plot
+      theme(legend.position = "none", plot.title = element_text(hjust = 0.5))  # Center the title
+    
+    # Define the file name using node_to_extract and the corresponding label
+    svg_filename <- paste0("sequence_logo_node_", node_to_extract, "_", labels[i], ".svg")
+    
+    # Export the plot as SVG using Cairo
+    CairoSVG(svg_filename, width = 4, height = 1.5)  # Adjust width/height as needed
+    print(seq_logo)
+    dev.off()  # Close the Cairo device after saving
+  }
+}
+
+# Call the function to generate and export the sequence logos as SVG files
+generate_sequence_logos_and_export(filtered_alignment, ordered_labels, windows, labels, node_to_extract)
+```
+
+The following makes seqlogos for clades between clades.
+
+```{r, fig.width=10, fig.height=17}
+
+#==========================================================================#
+#==================TO MAKE MSAS FOR CLADES BETWEEN CLADES==================#
+#==========================================================================#
+
+# Function to prune a tree, keeping tips between the specified nodes
+prune_tree_between_nodes <- function(tree, start_node, stop_node) {
+  # Get descendants of start_node (full clade)
+  descendants_start <- Descendants(tree, start_node, type = "tips")[[1]]
+  
+  # Get descendants of stop_node
+  descendants_stop <- Descendants(tree, stop_node, type = "tips")[[1]]
+  
+  # Remove descendants of stop_node from descendants of start_node
+  keep_tips <- setdiff(descendants_start, descendants_stop)
+  
+  # Prune tree to keep only the tips between start_node and stop_node
+  pruned_tree <- keep.tip(tree, tree$tip.label[keep_tips])
+  return(pruned_tree)
+}
+
+# Define the nodes to extract and stop at
+node_to_extract <- 879  # Start node
+stop_node <- 991        # Stop node
+
+# Prune the subtree to extract the clade starting at node_to_extract and stopping at stop_node
+subtree_pruned <- prune_tree_between_nodes(ml_phylo, node_to_extract, stop_node)
+
+# Convert the subtree to a dataframe to capture node order
+subtree_df <- fortify(subtree_pruned)
+
+# Order the tip labels by their y values in descending order (largest to smallest)
+ordered_labels <- subtree_df$label[order(-subtree_df$y)]
+
+# Remove any NA values from ordered_labels
+ordered_labels <- ordered_labels[!is.na(ordered_labels)]
+
+# Filter the cluster data and heatmap data to match the ordered subtree tip labels
+cluster_data <- data.frame(label = paste0(df2$`ID.6`, "__", gsub(" ", "_", df2$source_original)),
+                           cluster = factor(df2$agglomerative_cluster, levels = unique(df2$agglomerative_cluster)))  # Ensure consistent factor levels
+
+cluster_data_subtree <- cluster_data[cluster_data$label %in% ordered_labels, ]
+heatmap_data_subtree <- heatmap_data[rownames(heatmap_data) %in% ordered_labels, ]
+
+#===============================================================================#
+
+num_sequences <- length(ordered_labels)
+height_per_sequence <- 0.124 # Adjust this value to control the height per sequence
+dynamic_height <- num_sequences * height_per_sequence
+
+# Plot the new subtree
+subtree_plot <- ggtree(subtree_pruned, branch.length = "none") + 
+  geom_tiplab(size = 3, align = TRUE, linetype = "dotted", linesize = 0.5, offset = 3) + 
+  theme_tree2()
+
+#==========================================================================#
+# Define the function to generate MSA plots for multiple windows
+generate_msa_plots <- function(filtered_alignment, ordered_labels, windows) {
+  # Ensure alignment is in the correct order
+  ordered_alignment <- filtered_alignment[match(ordered_labels, names(filtered_alignment))]
+  
+  # Create an empty list to store plots
+  msa_plots <- list()
+  
+  # Loop through each window and generate the corresponding MSA plot
+  for (i in seq_along(windows)) {
+    window_start <- windows[[i]][1]
+    window_end <- windows[[i]][2]
+    
+    # Extract sequence data to use for overlaying text
+    alignment_data <- ggmsa::tidy_msa(ordered_alignment, start = window_start, end = window_end)
+    
+# Plot MSA using ggmsa and add text labels for amino acids
+msa_plot <- ggmsa(ordered_alignment, start = window_start, end = window_end, font = NULL, color = "Chemistry_AA") +
+  theme(legend.position = "none",  # Remove the legend
+        axis.text.y = element_text(size = 6, margin = margin(r = -35))) +  # Reduce right margin to bring y-axis labels closer
+  geom_text(data = alignment_data, aes(x = position, y = name, label = character), size = 2, color = "black") +  # Add text labels for amino acids
+  scale_x_continuous(breaks = seq(window_start, window_end, by = 5),  
+                     labels = seq(window_start, window_end, by = 5))
+ 
+    
+    # Add the plot to the list
+    msa_plots[[i]] <- msa_plot
+  }
+  
+  # Return the list of plots
+  return(msa_plots)
+}
+
+# Define the labels for each plot
+labels <- c("Everything", "EF1", "EF2", "EF3", "EF4")
+
+# Define the windows to process
+windows <- list(
+  c(0,114),   #Full_Length
+  c(16,27),   #EF1
+  c(40,51),   #EF2
+  c(65,76),   #EF3
+  c(89,100)   #EF4
+)
+
+# Call the function to generate the plots
+msa_plots <- generate_msa_plots(filtered_alignment, ordered_labels, windows)
+
+# Save the plot with dynamic height using ggsave()
+# Loop through each MSA plot and save them with dynamic file names
+for (i in seq_along(msa_plots)) {
+  # Define the file name using node_to_extract and the corresponding label
+  msa_subplot_fileName <- paste0("msa_subplot_", node_to_extract, "_", labels[i], ".png")
+  
+  # Save the plot for the current window
+  ggsave(msa_subplot_fileName, msa_plots[[i]], width = 12, height = dynamic_height, limitsize = FALSE)
+}
+
+# msa_plots[[1]]
+# msa_plots[[2]]
+# msa_plots[[3]]
+# msa_plots[[4]]
+```
+
+```{r, fig.width=5, fig.height=1.25}
+
+#==========================================================================#
+#========TO MAKE SEQUENCE LOGOS FOR THE MSA ABOVE (BETWEEN CLADES)=========#
+#==========================================================================#
+
+# Define the function to generate sequence logos for multiple windows and export as SVG
+generate_sequence_logos_and_export <- function(filtered_alignment, ordered_labels, windows, labels, node_to_extract) {
+  # Ensure alignment is in the correct order
+  ordered_alignment <- filtered_alignment[match(ordered_labels, names(filtered_alignment))]
+  
+  # Loop through each window and generate the corresponding sequence logo
+  for (i in seq_along(windows)) {
+    # Get the start and end positions for the current window
+    window_start <- windows[[i]][1]
+    window_end <- windows[[i]][2]
+    
+    # Extract the specific window from the MSA
+    aligned_sequences <- as.character(ordered_alignment)
+    aligned_window <- substring(aligned_sequences, window_start, window_end)
+    
+    # Convert cleaned sequences to AAStringSet (or DNAStringSet if working with DNA)
+    cleaned_sequences <- AAStringSet(aligned_window)
+    
+    # Generate the position frequency matrix (PFM)
+    pfm <- consensusMatrix(cleaned_sequences, as.prob = TRUE)
+    
+    # Plot the PFM with ggseqlogo and add the label at the top of each plot
+    seq_logo <- ggseqlogo(pfm, method = "bits", seq_type = "AA", col_scheme = "clustalx") + 
+      ggtitle(labels[i]) +  # Add the label for each plot
+      theme(legend.position = "none", plot.title = element_text(hjust = 0.5))  # Center the title
+    
+    # Define the file name using node_to_extract and the corresponding label
+    svg_filename <- paste0("sequence_logo_node_", node_to_extract, "_", labels[i], ".svg")
+    
+    # Export the plot as SVG using Cairo
+    CairoSVG(svg_filename, width = 4, height = 1.5)  # Adjust width/height as needed
+    print(seq_logo)
+    dev.off()  # Close the Cairo device after saving
+  }
+}
+
+# Call the function to generate and export the sequence logos as SVG files
+generate_sequence_logos_and_export(filtered_alignment, ordered_labels, windows, labels, node_to_extract)
+```
+
+```{r}
+
+#==========================================================================#
+#==========THIS CODE PRODUCES MSAs AND SEQ LOGOS FOR EACH CLUSTER==========#
+#==========================================================================#
+
+# Do not change the following node for extraction. It's just there to select the entire tree where all cluster data is annotated.
+node_to_extract <- 1231
+
+subtree <- extract.clade(ml_phylo, node_to_extract)
+
+# Convert the subtree to a dataframe to capture node order
+subtree_df <- fortify(subtree)
+
+# Order the tip labels by their y values in descending order (largest to smallest)
+ordered_labels <- subtree_df$label[order(-subtree_df$y)]
+
+# Remove any NA values from ordered_labels
+ordered_labels <- ordered_labels[!is.na(ordered_labels)]
+
+#========================================================================#
+
+# Define the function to generate MSA plots for multiple windows
+generate_msa_plots <- function(filtered_alignment, ordered_labels, windows) {
+  # Ensure alignment is in the correct order
+  ordered_alignment <- filtered_alignment[match(ordered_labels, names(filtered_alignment))]
+  
+  # Create an empty list to store plots
+  msa_plots <- list()
+  
+  # Loop through each window and generate the corresponding MSA plot
+  for (i in seq_along(windows)) {
+    window_start <- windows[[i]][1]
+    window_end <- windows[[i]][2]
+    
+    # Extract sequence data to use for overlaying text
+    alignment_data <- ggmsa::tidy_msa(ordered_alignment, start = window_start, end = window_end)
+    
+# Plot MSA using ggmsa and add text labels for amino acids
+msa_plot <- ggmsa(ordered_alignment, start = window_start, end = window_end, font = NULL, color = "Chemistry_AA") +
+  theme(legend.position = "none",  # Remove the legend
+        axis.text.y = element_text(size = 6, margin = margin(r = 0))) +  # Reduce right margin to bring y-axis labels closer
+  geom_text(data = alignment_data, aes(x = position, y = name, label = character), size = 2, color = "black") +  # Add text labels for amino acids
+  scale_x_continuous(breaks = seq(window_start, window_end, by = 5),  
+                     labels = seq(window_start, window_end, by = 5))
+ 
+    
+    # Add the plot to the list
+    msa_plots[[i]] <- msa_plot
+  }
+  
+  # Return the list of plots
+  return(msa_plots)
+}
+
+#========================================================================#
+
+# Loop over clusters 0 to 7
+for (cluster_for_seqLogo in 0:7) {
+  
+  # Step 1: Filter the cluster data for the current cluster using cluster_data
+  cluster_data_filtered <- cluster_data[cluster_data$cluster == cluster_for_seqLogo, ]
+  
+  # Step 2: Filter the ordered labels to only include sequences from the current cluster
+  ordered_labels_cluster <- ordered_labels[ordered_labels %in% cluster_data_filtered$label]
+  
+num_sequences <- length(ordered_labels_cluster)
+height_per_sequence <- 0.15 # Adjust this value to control the height per sequence
+dynamic_height <- num_sequences * height_per_sequence
+  
+  # Step 3: Filter the alignment data for the sequences in the current cluster
+  filtered_alignment_cluster <- filtered_alignment[match(ordered_labels_cluster, names(filtered_alignment))]
+  
+  # Step 4: Skip this cluster if no sequences are found
+  if (length(ordered_labels_cluster) == 0) {
+    message(paste("No sequences found for cluster", cluster_for_seqLogo))
+    next  # Skip to the next cluster
+  }
+  
+  # Step 5: Call the function to generate MSA plots for the current cluster
+  msa_plots_cluster <- generate_msa_plots(filtered_alignment_cluster, ordered_labels_cluster, windows)
+  
+  # Step 6: Loop through each MSA plot and save them with dynamic file names for the current cluster
+  for (i in seq_along(msa_plots_cluster)) {
+    # Define the file name using the cluster_for_seqLogo variable and the corresponding label
+    msa_subplot_fileName <- paste0("msa_subplot_cluster_", cluster_for_seqLogo, "_", labels[i], ".png")
+    
+    # Save the plot for the current window
+    ggsave(msa_subplot_fileName, msa_plots_cluster[[i]], width = 12, height = dynamic_height, limitsize = FALSE)
+  }
+  
+  # Step 7: Call the function to generate and export the sequence logos for the current cluster
+  generate_sequence_logos_and_export(filtered_alignment_cluster, ordered_labels_cluster, windows, labels, cluster_for_seqLogo)
+}
+
+```
+
+The stuff below is new stuff now for plotting the heatmap witht he MSAs.
+
+```{r, fig.width=12, fig.height=17}
+# | eval: false
+
+combined <- subtree_plot_with_heatmap + msa_plots
+
+# Export the plot as an SVG file
+# CairoSVG("09-25-2024_combinedTestClusterHeatmapMSAPlot.svg", width = 12, height = 17)
+
+
+
+
+# Print the plot
+print(combined)
+
+# Close the device
+dev.off()
+```
+
+```{r, fig.width=20, fig.height=105}
+# | eval: false
+
+# Convert the alignment object to AAStringSet
+alignment_protein <- as(prot_alignment, "AAStringSet")
+
+# Write the alignment to a FASTA file
+writeXStringSet(alignment_protein, filepath = "alignment_protein.fasta")
+
+# Now add the MSA next to the heatmap without duplicating the tree
+r <- msaplot(tree_plot, fasta = "alignment_protein.fasta", offset = 0, width = 4)
+
+q + r
+
+```
+
+```{r, fig.width=10, fig.height=6}
+
+#==========================================================================#
+#==================TO MAKE THE PHYLOGENETIC TREE OVERVIEW==================#
+#==========================================================================#
+
+# Define the list of node values you want to highlight
+highlighted_nodes <- c(670, 1123,617, 1142, 868, 775, 879, 872, 831, 846,828)  # Replace with your list of node numbers to highlight
+
+# Plot the Maximum Likelihood (ML) tree with circular layout, showing only the highlighted nodes
+circular_tree_plot <- ggtree(ml_phylo, layout = "circular") +
+  # Display only the nodes that are in the highlighted_nodes list
+  geom_text2(aes(label = node, subset = node %in% highlighted_nodes),  # Plot only nodes in the list
+             hjust = -0.5, size = 2, color = "red") + 
+  theme_void()
+
+# Export the plot as an SVG file
+#CairoSVG("10-03-2024_tree_plot_equal_angleTEST.svg", width = 10, height = 10)
+
+# Print the plot
+print(circular_tree_plot)
+
+```
+
+```{r}
+
+#==========================================================================#
+#=====================TO HIGHLIGHT CLADES IN THE TREE======================#
+#==========================================================================#
+
+# Define the list of node values you want to highlight
+# highlighted_nodes <- c(670, 1123,617, 1142, 868, 775, 879, 872, 831, 846,828)
+highlighted_nodes <- c(1143)
+
+# Initialize an empty vector to store all descendant nodes
+descendants <- vector()
+
+# Loop over each highlighted node and get the descendants (offspring)
+for (node in highlighted_nodes) {
+  # Get all descendants of the node
+  descendants <- c(descendants, offspring(ml_phylo, node))
+}
+
+# Combine highlighted nodes and their descendants to color the entire clade
+all_highlighted <- unique(c(highlighted_nodes, descendants))
+
+circular_tree_plot <- ggtree(ml_phylo, layout = "equal_angle") +
+  # Color branches red if they fall under any of the highlighted nodes or their descendants
+  geom_tree(aes(color = ifelse(node %in% all_highlighted, "red", "black"), 
+                alpha = ifelse(node %in% all_highlighted, 1, 0))) +  # Set alpha transparency for non-highlighted branches
+  scale_color_identity() +  # Use exact colors specified
+  scale_alpha_identity() +  # Use exact alpha values specified
+  theme_void()
+
+# Export the plot as an SVG file
+#CairoSVG("10-03-2024_tree_plot_equal_angleTEST.svg", width = 10, height = 10)
+
+# Print the plot
+print(circular_tree_plot)
+```
+
+```{r}
+# | eval: false
+
+# Extract tip labels from the tree
+tree_labels <- ml_phylo$tip.label
+
+# Extract row names from the heatmap data
+heatmap_labels <- rownames(heatmap_data)
+
+# Identify tip labels that are in the tree but not in the heatmap
+missing_in_heatmap <- setdiff(tree_labels, heatmap_labels)
+
+# Identify row names that are in the heatmap but not in the tree
+missing_in_tree <- setdiff(heatmap_labels, tree_labels)
+
+# Print the results
+cat("Tip labels in the tree but missing in the heatmap data:\n")
+print(missing_in_heatmap)
+
+cat("\nRow names in the heatmap data but missing in the tree:\n")
+print(missing_in_tree)
+
+```
+
+```{r, fig.width=12, fig.height=105}
+# Select specific columns for heatmap (e.g., "Y.9", "La.9", "Ce.9", etc.)
+heatmap_data <- df2[, c("Y.9", "La.9", "Ce.9", "Pr.9", "Nd.9", "Sm.9", "Eu.9", 
+                        "Gd.9","Tb.9", "Dy.9", "Ho.9", "Er.9", "Tm.9", "Yb.9", 
+                        "Lu.9")]
+
+# Create tip labels in the same format as the tree: "ID.6 | source_original"
+rownames(heatmap_data) <- paste0(df2$`ID.6`, "__", gsub(" ", "_", df2$source_original))
+
+# Replace any NA values in the heatmap data with 0 (or another placeholder)
+heatmap_data[is.na(heatmap_data)] <- 0
+
+# Ensure the row names match the tip labels in the tree
+ml_phylo$tip.label <- gsub(" ", "_", ml_phylo$tip.label)  # Replace spaces with underscores in tip labels if necessary
+rownames(heatmap_data) <- gsub(" ", "_", rownames(heatmap_data))  # Replace spaces with underscores if necessary
+
+# Extract the agglomerative cluster information and align it with the tree tips
+cluster_data <- data.frame(label = paste0(df2$`ID.6`, "__", gsub(" ", "_", df2$source_original)),
+                           cluster = factor(df2$agglomerative_cluster, levels = unique(df2$agglomerative_cluster)))  # Consistent levels for all clusters
+
+# Plot the ML tree using ggtree
+tree_plot <- ggtree(ml_phylo, branch.length = "none", color = 'black') + 
+  geom_tiplab(size = 3, align = TRUE, linetype = "dotted", linesize = 0.5, 
+              offset = 10) + theme_tree2() + xlim(NA, 150) + geom_text2(aes(label = node), hjust = -0.5, size = 4)
+
+# Add shapes corresponding to the agglomerative cluster between the tree tip labels and the heatmap using geom_fruit
+p <- tree_plot + 
+  geom_fruit(data = cluster_data, geom = geom_point, 
+             mapping = aes(y = label, color = as.factor(cluster)), 
+             size = 4, shape = 15, offset = 0.15) +  
+            scale_color_manual(values = python_colors, 
+                               name = "Agglomerative Cluster", drop = FALSE)  # Keep all colors, even if some clusters are missing
+
+q <- gheatmap(p, heatmap_data, offset = 60, width = 1.1, legend_title = "Selectivity", font.size = 3, colnames_position = "top") +
+  scale_fill_gradientn(colors = c("turquoise", "white", "red"))
+
+q
+
+```
+
+```{r, fig.width=8, fig.height=17}
+# Define the node to extract the subtree
+node_to_extract <- 1123
+
+# Extract the subtree rooted at node 671
+subtree <- extract.clade(ml_phylo, node_to_extract)
+
+# Filter the cluster data and heatmap data to match the subtree
+subtree_labels <- subtree$tip.label
+
+# Ensure factor levels remain consistent for all clusters
+cluster_data <- data.frame(label = paste0(df2$`ID.6`, "__", gsub(" ", "_", df2$source_original)),
+                           cluster = factor(df2$agglomerative_cluster, levels = unique(df2$agglomerative_cluster)))  # Same factor levels
+
+# Filter cluster_data and heatmap_data to match the subtree tip labels
+cluster_data_subtree <- cluster_data[cluster_data$label %in% subtree_labels, ]
+heatmap_data_subtree <- heatmap_data[rownames(heatmap_data) %in% subtree_labels, ]
+
+# Plot the new subtree
+subtree_plot <- ggtree(subtree, branch.length = "none") + 
+  geom_tiplab(size = 3, align = TRUE, linetype = "dotted", linesize = 0.5, offset = 3) + 
+  theme_tree2() +
+  theme(legend.position = "none")
+
+# Add shapes corresponding to the agglomerative cluster using geom_fruit
+subtree_plot <- subtree_plot + 
+  geom_fruit(data = cluster_data_subtree, geom = geom_point, 
+             mapping = aes(y = label, color = as.factor(cluster)), 
+             size = 3, shape = 15, offset = 0.1) +  
+  scale_color_manual(values = python_colors, name = "Agglomerative Cluster", drop = FALSE)  # Keep all colors for consistency
+
+# Add the heatmap to the subtree plot
+subtree_plot_with_heatmap <- gheatmap(subtree_plot, heatmap_data_subtree, 
+                                      offset = 20, width = 0.65, 
+                                      legend_title = "Selectivity", 
+                                      font.size = 3, colnames_position = "top") +
+  scale_fill_gradientn(colors = c("turquoise", "white", "red")) +
+  theme(legend.position = "none")
+
+# Display the final plot with the subtree, shapes, and heatmap
+subtree_plot_with_heatmap
+
+```
+
+```{r}
+
+#==========================================================================#
+#======TO GENERATE THE ULTIMATE PHYLOGENETIC TREE FOR MAIN MANUSCRIPT======#
+#==========================================================================#
+
+# Use %<+% to attach cluster_data to the tree
+circular_tree_plot <- ggtree(ml_phylo, layout="fan", open.angle=180) %<+% cluster_data +
+  # Add circular points at the tips with colored fill and white border
+  geom_tippoint(aes(fill = as.factor(cluster)), color = "black", size = 0.5, shape = 21, stroke = 0.1) +
+  # Set up the fill color scale for clusters
+  scale_fill_manual(values = python_colors, name = "Agglomerative Cluster") +
+  theme_void() +
+  theme(legend.position = "none")
+
+circular_tree_plot <- rotate_tree(circular_tree_plot, angle = -180)
+
+#CairoSVG("10-06-2024_tree_plot_colored_tips_FANv2.svg", width = 10, height = 10)
+
+# Print the tree
+print(circular_tree_plot)
+```
+
+```{r}
+#==========================================================================#
+#======TO GENERATE THE ULTIMATE PHYLOGENETIC TREE FOR MAIN MANUSCRIPT======#
+#===============AND HIGHLIGHT THE SPECIFIC TIPS OF INTEREST================#
+#==========================================================================#
+
+# Create a new column to flag the tips to be highlighted in red
+cluster_data$highlight <- ifelse(
+  cluster_data$label %in% c("621__Methylorubrum_extorquens", "180__Hansschlegelia_quercus"),
+  "highlight", "normal"
+)
+
+# Use %<+% to attach cluster_data to the tree
+circular_tree_plot <- ggtree(ml_phylo, layout = "fan", open.angle = 180) %<+% cluster_data +
+  # Add circular points at the tips with a conditional color based on the 'highlight' column
+  geom_tippoint(
+    aes(fill = as.factor(cluster), color = ifelse(highlight == "highlight", "red", "black")), 
+    size = 0.5, shape = 21, stroke = 0.1
+  ) +
+  # Set up the fill color scale for clusters
+  scale_fill_manual(values = python_colors, name = "Agglomerative Cluster") +
+  scale_color_identity() +  # Use the color mapping directly
+  theme_void() +
+  theme(legend.position = "none")
+
+# Rotate the tree plot by 180 degrees clockwise
+circular_tree_plot <- rotate_tree(circular_tree_plot, angle = -180)
+
+# CairoSVG("10-10-2024_tree_plot_colored_tips_FANv2_canDelete.svg", width = 10, height = 10)
+
+# Print the tree
+print(circular_tree_plot)
+
+```
+
+```{r}
+#==========================================================================#
+#==============TO ZOOM INTO THE BRADYRHIZOBIUM MAJOR BRANCH IV=============#
+#==========================================================================#
+
+# Double the edge lengths
+ml_phylo2 <- ml_phylo
+ml_phylo2$edge.length <- ml_phylo2$edge.length +0.015
+# Use %<+% to attach cluster_data to the tree
+circular_tree_plot <- ggtree(ml_phylo2) %<+% cluster_data +
+  # Add circular points at the tips with colored fill and white border
+  geom_tippoint(aes(fill = as.factor(cluster)), color = "black", size = 0.75, shape = 21, stroke = 0.1) +
+  # Set up the fill color scale for clusters
+  scale_fill_manual(values = python_colors, name = "Agglomerative Cluster") +
+  theme_void() +
+  theme(legend.position = "none")
+
+# Save the plot as an SVG
+CairoSVG("10-12-2024_tree_plot_colored_tips_FANv2_toDelete.svg", width = 10, height = 10)
+
+# Print the tree
+print(circular_tree_plot)
+```
+
+```{r}
+
+#==========================================================================#
+#=============CREATe A VERSION OF THE MASTER PHYLOGENETIC TREE=============#
+#=============THAT INCLUDES LABELS FOR HIGHLIGHTED NODES BELOW=============#
+#==========================================================================#
+
+highlighted_nodes <- c(670,751,747,826,767,846,775,737,851,821,831,865,872,879,991,839,1123,673,737,896,987,1143,1147,1156,1152,820,897)
+
+# Create the ggtree object and attach cluster_data
+ggtree_obj <- ggtree(ml_phylo, layout = "fan", open.angle = 135) %<+% cluster_data
+
+# Extract the plotting data
+tree_data <- ggtree_obj$data
+
+# Ensure that bootstrap values are in the label column for internal nodes
+tree_data$label[!tree_data$isTip] <- ml_phylo$node.label
+
+# Create a combined label with node number and bootstrap value
+tree_data$bootstrap_label[!tree_data$isTip] <- paste0(
+  "n", tree_data$node[!tree_data$isTip],
+  "\nbs", sprintf("%.2f", as.numeric(tree_data$label[!tree_data$isTip]))
+)
+
+# Calculate angles for internal nodes
+Ntip <- length(ml_phylo$tip.label)
+Nnode <- ml_phylo$Nnode
+
+# Initialize angle for internal nodes
+tree_data$angle[!tree_data$isTip] <- NA
+
+for (node in (Ntip + 1):(Ntip + Nnode)) {
+  # Get descendant tip indices
+  desc_tips <- Descendants(ml_phylo, node, type = "tips")[[1]]
+  # Get the node numbers in tree_data corresponding to these tips
+  tip_nodes <- desc_tips
+  # Get the angles of these tips from tree_data
+  tip_angles <- tree_data$angle[match(tip_nodes, tree_data$node)]
+  # Calculate mean angle, handling circular data
+  # Convert angles to radians
+  tip_angles_rad <- tip_angles * pi / 180
+  # Calculate mean angle using atan2
+  mean_sin <- mean(sin(tip_angles_rad))
+  mean_cos <- mean(cos(tip_angles_rad))
+  mean_angle_rad <- atan2(mean_sin, mean_cos)
+  # Convert back to degrees
+  mean_angle <- mean_angle_rad * 180 / pi
+  # Ensure angle is between 0 and 360
+  mean_angle <- (mean_angle + 360) %% 360
+  # Assign to tree_data$angle
+  tree_data$angle[tree_data$node == node] <- mean_angle
+}
+
+# Adjust the label angle and alignment for better readability
+tree_data$label_angle <- tree_data$angle
+tree_data$hjust <- 0
+tree_data$label_angle <- ifelse(
+  tree_data$angle > 90 & tree_data$angle < 270,
+  (tree_data$angle + 180) %% 360,
+  tree_data$angle
+)
+
+# Update the ggtree object with the modified data
+ggtree_obj$data <- tree_data
+
+# Proceed with plotting
+circular_tree_plot <- ggtree_obj +
+  geom_tippoint(
+    aes(fill = as.factor(cluster)),
+    color = "black",
+    size = 0.75,
+    shape = 21,
+    stroke = 0.1
+  ) +
+  geom_label2(
+    aes(
+      subset = !isTip & !is.na(bootstrap_label) & (node %in% highlighted_nodes),
+      label = bootstrap_label,
+      angle = label_angle,
+      hjust = hjust
+    ),
+    size = 0.5,                # Increase text size for readability
+    fill = "white",          # Background color
+    color = "grey20",        # Text color
+    alpha = 0,             # Adjust opacity (0 = transparent, 1 = opaque)
+    label.size = 0           # Remove the border of the label
+  ) +
+  scale_fill_manual(values = python_colors, name = "Agglomerative Cluster") +
+  theme_void() +
+  theme(legend.position = "none")
+
+# Rotate the tree plot by 180 degrees clockwise
+circular_tree_plot <- rotate_tree(circular_tree_plot, angle = 150)
+
+# Save the tree plot as an SVG file
+# CairoSVG("10-07-2024_tree_plot_colored_tips_FANv2_bootstrap_values.svg", width = 10, height = 10)
+
+# Print the tree
+print(circular_tree_plot)
+```
+
+```{r}
+
+#==========================================================================#
+#=====TO EXTRACT THE NECESSARY DATA (MSA, LABELS) FOR MACHINE LEARNING=====#
+#==========================================================================#
+
+# Extract the sequence names (descriptors) and sequences from the AAStringSet object
+sequence_labels <- names(alignment_protein)  # Extract the names (labels/descriptors)
+sequence_list <- as.character(alignment_protein)  # Convert the sequences to character strings
+
+# Create a dataframe for the sequences and labels
+df_sequences <- data.frame(
+  descriptor = sequence_labels,
+  sequence = sequence_list,
+  stringsAsFactors = FALSE  # Prevent conversion to factors
+)
+
+# Now align the logD data (heatmap_data) to match the sequence labels
+logD_data <- heatmap_data[rownames(heatmap_data) %in% sequence_labels, , drop = FALSE]
+
+# Ensure the logD data has the same order as the sequence labels
+logD_data <- logD_data[match(df_sequences$descriptor, rownames(logD_data)), , drop = FALSE]
+
+# Convert logD data to a dataframe if it's not already
+df_logD <- as.data.frame(logD_data)
+
+# Combine the sequences, labels, and logD data into a final dataframe df3
+df3 <- cbind(df_sequences, df_logD)
+
+# Preview the resulting dataframe
+head(df3)
+
+# Export df3 as a CSV file
+write.csv(df3, file = "09-30-2024_LanM-Ortholog-Data-for-ML.csv", row.names = FALSE)
+```
